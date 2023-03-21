@@ -1,0 +1,1336 @@
+---
+title: "Analisi microbioma"
+author: "Dargenio Elisabetta, Grassi Angela, Marcolin Erica"
+date: "7/1/2021"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Carichiamo pacchetti utili
+```{r}
+library(phyloseq)
+library(curatedMetagenomicData)
+library(reshape2)
+library(ggplot2)
+library(cowplot)
+library(edgeR)
+library(zinbwave)
+library(MAST)
+library(metagenomeSeq)
+library(EDASeq)
+library(edgeR)
+library(DESeq2)
+library(MGLM)
+library(plyr)
+library(stats)
+library(scde)
+```
+
+
+Scarichiamo i dati 
+```{r}
+oral <- ("BritoIL_2016.metaphlan_bugs_list.oralcavity")
+esl <- curatedMetagenomicData(oral, dryrun = FALSE, counts=TRUE, bugs.as.phyloseq = TRUE)
+data<-esl[[1]]
+#class(data)
+#data
+#otu_table(data)[1859:1864,1:5]
+head(sample_data(data))
+
+
+exset<- curatedMetagenomicData(oral, dryrun = FALSE, counts=TRUE)
+brito_exset<-exset[[1]]
+
+```
+
+Il dataset è stato salvato dentro l'oggetto 'data' in formato phyloseq.
+L'oggetto phyloseq è composto da tre parti: OTU Table, che contiene l'Operational Taxanomic Unit (OTU) table (1864 taxa e 140 samples); la Sample Data, contenente i metadati; la Taxonomy Table, contenente la tassonomia.
+
+
+(Nel codice commentato abbiamo aggiunto le analisi alternative che abbiamo svolto)
+
+
+Come prima operazione, scegliamo il livello di aggregazione gerarchico su cui vogliamo lavorare: Strain (ceppo), l'ultimo livello di aggrezione.
+Filtriamo i dati sia sui taxa che sui campioni
+
+```{r}
+data_strain = subset_taxa(data, !is.na(Strain)) # utilizzo solo le OTU al livello di "Strain"(ceppo), l'ultimo
+#teniamo i taxa con più di 10 conteggi in più di 1 campione
+filtered_strain <- filter_taxa(data_strain,function(x) sum(x>10)>1,1)
+
+
+#Si potrebbe fare anche un tentativo al livello superiore (Species), selezionando 'species' tramite il codice sotto e rifacendo poi tutta l'analisi che noi abbiamo svolto su 'strain': 
+
+#data_species = subset_taxa(data, !is.na(Species)& is.na(Strain))
+#filtered_species <- filter_taxa(data_species,function(x) sum(x>10)>1,1)
+#Si ottengono 715 taxa che dopo il filtraggio diventano 319 taxa a livello di Species.
+
+#filtraggio campioni vuoti
+ps <- prune_samples(sample_sums(filtered_strain) > 0, filtered_strain)
+#nessun campione filtrato
+
+
+
+```
+Selezionando solo il rango 'Strain', il nuovo oggetto phyloseq 'data_strain' è composto da 630 taxa e 140 campioni.
+Si effettua un filtraggio di questo oggetto in modo da rimuovere i taxa troppo poco espressi, in particolare si tengono solo i taxa con più di 10 conteggi in più di 1 campione. Il nuovo oggetto filtrato 'filtered_strain' è composto da 282 taxa e 140 campioni.
+Si prova anche un filtraggio sui campioni per rimuovere eventualmente quelli con 0 conteggi, ma nessun campione viene rimosso.
+
+COstruiamo una matrice di conteggio 'counts_strain' a partire dall'oggetto otu_table.
+```{r}
+counts_strain <- as(filtered_strain@otu_table@.Data,"matrix")
+
+```
+
+##Analisi per classi di età
+
+Ricodifichiamo la variabile 'age' in una variabile categoriale con 3 categorie, questa variabile verrà poi usata come covariata nella matrice del disegno.
+
+```{r}
+#dividiamo la distribuzione della variabile age in terzili
+quantile(filtered_strain@sam_data$age, probs=c(0,0.3333,0.6666,1))
+#primo terzile 22, secondo 41, terzo 69
+
+#costruiamo una nuova variabile 'age_agg' con 3 livelli: <=22, >22 & <=41, >41
+filtered_strain@sam_data$age_agg[filtered_strain@sam_data$age<=22] = "Giovani"
+filtered_strain@sam_data$age_agg[filtered_strain@sam_data$age>22 & filtered_strain@sam_data$age<=41] = "Adulti"
+filtered_strain@sam_data$age_agg[filtered_strain@sam_data$age>41] = "Anziani"
+
+
+#filtered_strain@sam_data$eta_agg[filtered_strain@sam_data$age<=12] = 'Bambini'
+#filtered_strain@sam_data$eta_agg[filtered_strain@sam_data$age>12 & filtered_strain@sam_data$age<=30] = 'Ragazzi'
+#filtered_strain@sam_data$eta_agg[filtered_strain@sam_data$age>30 & filtered_strain@sam_data$age<=40] = 'Adulti'
+#filtered_strain@sam_data$eta_agg[filtered_strain@sam_data$age>40] = 'Anziani'
+
+#filtered_strain@sam_data$eta_agg<-factor(filtered_strain@sam_data$eta_agg)
+
+#rendo age_agg una variabile fattoriale
+filtered_strain@sam_data$age_agg<-factor(filtered_strain@sam_data$age_agg)
+```
+
+
+(aggiungiamo qui sotto le prime parti di codice per poter poi proseguire con l'analisi a livello di 'Species', anzichè di 'Strain')
+```{r}
+# Ricodifichiamo la variabile ‘age’ in una variabile categoriale 
+
+#summary(filtered_species@sam_data$age)
+#quantile(filtered_species@sam_data$age, probs=c(0,0.3333,0.6666,1))
+
+#costruiamo una nuova variabile 'age_agg' con 3 livelli: <=22, >22 & <=41, >41
+
+#filtered_species@sam_data$age_agg[filtered_species@sam_data$age<=22] = "1-22"
+#filtered_species@sam_data$age_agg[filtered_species@sam_data$age>22 & filtered_species@sam_data$age<=41] = "23-41"
+#filtered_species@sam_data$age_agg[filtered_species@sam_data$age>41] = "42-69"
+
+
+# rendo age_agg un fattore
+#filtered_species@sam_data$age_agg<-factor(filtered_species@sam_data$age_agg)
+
+#table(filtered_species@sam_data$age_agg)
+ 
+##  1-22 23-41 42-69 
+##    48    46    46
+ 
+# rendo gender un fattore
+#filtered_species@sam_data$gender<- factor(filtered_species@sam_data$gender)
+ 
+# matrici del disegno per Species
+#design_age<- model.matrix(~ age_agg, data.frame(filtered_species@sam_data))
+#design_gender<-  model.matrix(~ gender, data.frame(filtered_species@sam_data))
+ 
+## matrice di conteggio per Species
+#counts_species <- as(filtered_species@otu_table@.Data,"matrix")
+
+```
+
+
+
+Prime analisi esplorative: barplot
+
+```{r}
+library(RColorBrewer)
+pal <- brewer.pal(8, "Dark2") #creo vettori di colori, ne creo 8
+
+#barplot(colSums(counts_strain), col=pal[filtered_strain@sam_data$eta_agg], las=2)
+barplot(colSums(counts_strain), col=pal[filtered_strain@sam_data$age_agg], las=2)
+abline(h=23000000)
+```
+
+Dai barplot emerge che alcuni campioni hanno un numero di reads di molto superiore rispetto a tutti gli altri, non sembra che queste numerosità siano correlate con la variabile dell'età, sospettiamo quindi ci sia della variabilità tecnica dei dati. Per questo motivo, non avendo a disposizione nessuna possibile variabile confondente da aggiungere al modello, e avendo un numero piuttosto elevato di campioni, decidiamo di rimuovere questi 12 campioni sospetti e procedere con l'analisi sui campioni rimanenti.
+
+```{r}
+index_3<-which(colSums(counts_strain)>23000000)
+#eliminiamo 12 campioni perchè troppo variabili rispetto agli altri
+counts_strain_3<-counts_strain[,-index_3]
+#ci sono alcuni campioni con un numero di reads molto più elevato rispetto agli altri, ma non abbiamo variabili tecniche a disposizione nel dataset per poter capire se questa sia variabilità tecnica, anche se molto probabilmente è proprio così
+
+tokeep<-names(which(colSums(counts_strain)<=23000000))
+samdata_strain<- as(filtered_strain@sam_data,"matrix")
+samdata_strain_3<- samdata_strain[tokeep,]
+
+barplot(colSums(counts_strain_3), col=pal[factor(data.frame(samdata_strain_3)$age_agg)], las=2)
+#i conteggi sembrano un po' più equilibrati tra i campioni
+```
+
+Nell'oggetto counts_strain_3 è contenuta la matrice dei conteggi senza i 12 campioni rimossi, in samdata_strain_3 ci sono i sample data senza i 12 campioni.
+
+Procediamo con gli RLE plot e l'analisi delle prime due componenti principali.
+
+```{r}
+library(EDASeq)
+#EDASeq::plotRLE(counts_strain, outline=FALSE, las=2)
+EDASeq::plotRLE(counts_strain_3, outline=FALSE, las=2)
+
+plotPCA(counts_strain_3, col=pal[filtered_strain@sam_data$age_agg])
+#plotPCA(counts_strain, col=pal[filtered_strain@sam_data$age_agg])
+```
+Dall'RLE plot si evince che saranno necessarie normalizzazioni sui dati. 
+Dal plot sulle componenti principali, non si nota nessun tipo di raggruppamento tra i campioni, nello specifico, nessuna classe di età sembra essere spiegata dalle prime due componenti principali. 
+
+
+
+Costruiamo la matrice del disegno inserendo come covariata la nuova variabile 'age_agg'.
+
+```{r}
+#matrice del disegno
+#design_age<- model.matrix(~ age_agg, data.frame(filtered_strain@sam_data))
+#design_eta<- model.matrix(~ eta_agg, data.frame(filtered_strain@sam_data))
+
+#design_eta_3<- model.matrix(~ eta_agg, data.frame(samdata_strain_3))
+design_age_3<- model.matrix(~ age_agg, data.frame(samdata_strain_3))
+```
+
+## Analisi grafica
+
+Costruiamo un oggetto SummarizedExperiment partendo dall'oggetto ExpressionSet, da poter usare poi con zinbwave
+```{r echo=TRUE}
+brito_exset@phenoData@data$age_agg<- filtered_strain@sam_data$age_agg
+
+se_brito<-makeSummarizedExperimentFromExpressionSet(brito_exset)
+
+# filtro i geni poco espressi, rimuovo quei geni che non hanno almeno 5 reads per almeno 5 campioni
+se_filter<- rowSums(assay(se_brito)>10)>1
+table(se_filter)
+
+se <- se_brito[se_filter,]
+assayNames(se)[1] <- "counts"
+
+```
+
+Per ottenere un oggetto a bassa dimensionalità utilizziamo zinbwave, si da in input un summarizedExperiment e dà in output un SingleCellExperiments
+
+```{r}
+se_zinb20 <- zinbwave(se, K = 20, epsilon=1000)
+
+W20 <- reducedDim(se_zinb20)
+#grafico semplice a colori per fascia d'età
+data.frame(W20, age=colData(se_brito)$age_agg)%>%
+    ggplot(aes(W1, W2, colour=age)) + geom_point() + 
+    scale_color_brewer(type = "qual", palette = "Set1") + theme_classic()
+
+set.seed(93024)
+
+#A t-SNE representation of the data can be obtained by computing the cell distances in the reduced space and running the t-SNE algorithm on the distance
+library(Rtsne)
+
+tsne_data <- Rtsne(W20, pca = FALSE, perplexity=10, max_iter=5000)
+
+data.frame(Dim1=tsne_data$Y[,1], Dim2=tsne_data$Y[,2], 
+           age=colData(se_brito)$age_agg) %>%
+    ggplot(aes(Dim1, Dim2, colour=age)) + geom_point() + 
+    scale_color_brewer(type = "qual", palette = "Set1") + theme_classic()
+
+
+```
+Dalla rappresentazione a bassa dimensionalità t-SNE, sembra non emergere alcun pattern tra i campioni, probabilmente l'età non è una variabile legata alla variabilità biologica.
+
+
+
+# Normalizzazione tra campioni
+
+## Upper-quartile e full-quantile
+
+Il pacchetto `EDASeq` implementa diverse normalizzazioni. Tra quelle che abbiamo visto in classe, la upper-quartile e la full-quantile.
+
+Entrambe sono implementate nella funzione `betweenLaneNormalization`.
+
+```{r}
+#counts_strain_up <- betweenLaneNormalization(counts_strain, which="upper")
+#counts_strain_fu <- betweenLaneNormalization(counts_strain, which="full")
+
+counts_strain_up_3 <- betweenLaneNormalization(counts_strain_3, which="upper")
+counts_strain_fu_3 <- betweenLaneNormalization(counts_strain_3, which="full")
+```
+
+Nell'oggetto 'counts_strain_up' salviamo i dati normalizzati con la upper-quartile, in 'counts_strain_fu' i dati normalizzati con la full-quartile.
+
+
+
+
+```{r}
+#Possiamo verificare che le normalizzazioni abbiano fatto ciò per cui sono progettate andando a vedere il boxplot dei dati normalizzati: ci aspettiamo che nel caso della upper-quartile, tutti i quartili superiori siano uguali, mentre nel caso della full-quantile che le distribuzioni empiriche siano uguali.
+
+
+
+#boxplot(log1p(counts_strain_up),  las=2)
+#boxplot(log1p(counts_strain_fu), las=2)
+
+#boxplot(log1p(counts_strain_up_3),  las=2)
+#boxplot(log1p(counts_strain_fu_3), las=2)
+
+```
+
+
+
+
+## TMM
+La normalizzazione TMM è implementata nel pacchetto `edgeR`, in cui è implementata anche la upper-quartile.
+
+Per come è implementato `edgeR` non restituisce le matrici dei dati normalizzati, ma i fattori di normalizzazione, che moltiplicati per il numero totale di reads danno il fattore di scala da moltiplicare ai dati originali per ottenere i dati normalizzati.
+
+La funzione per calcolare i fattori di normalizzazione si chiama `calcNormFactor()`.
+
+```{r}
+library(edgeR)
+#tmm_factors <- edgeR::calcNormFactors(counts_strain, method = "TMM")
+tmm_factors_3<-  edgeR::calcNormFactors(counts_strain_3, method = "TMM")
+#counts_strain_tmm <- edgeR::cpm(counts_strain, lib.size = tmm_factors * colSums(counts_strain))
+counts_strain_tmm_3 <- edgeR::cpm(counts_strain_3, lib.size = tmm_factors_3 * colSums(counts_strain_3))
+
+#boxplot(log1p(counts_strain_tmm), las=2, outline=F)
+#boxplot(log1p(counts_strain_tmm_3), las=2, outline=F)
+
+
+```
+
+
+##RLE 
+Il metodo della media geometrica è chiamato `RLE` in `edgeR`.
+
+```{r}
+#rle_factors <- edgeR::calcNormFactors(counts_strain, method = "RLE") 
+rle_factors_3 <- edgeR::calcNormFactors(counts_strain_3, method = "RLE") 
+#fattori di normalizzazione
+
+
+#counts_strain_rle <- edgeR::cpm(counts_strain, lib.size = rle_factors * colSums(counts_strain))
+counts_strain_rle_3 <- edgeR::cpm(counts_strain_3, lib.size = rle_factors_3 * colSums(counts_strain_3))
+#salviamo la matrice negli assays
+
+#boxplot(log1p(counts_strain_rle), las=2)
+#boxplot(log1p(counts_strain_rle_3), las=2)
+```
+# Confronto tra normalizzazioni
+```{r}
+#EDASeq::plotRLE(counts_strain_fu, main='Normalizzazione Full quantile', outline= F, las=2)
+#EDASeq::plotRLE(counts_strain_up, main='Normalizzazione Upper quartile', outline= F, las=2)
+#EDASeq::plotRLE(counts_strain_tmm, main='Normalizzazione TMM', outline= F, las=2)
+#EDASeq::plotRLE(counts_strain_rle, main='Normalizzazione RLE', outline= F, las=2)
+
+EDASeq::plotRLE(counts_strain_fu_3, main='Normalizzazione Full quantile', outline= F, las=2)
+EDASeq::plotRLE(counts_strain_up_3, main='Normalizzazione Upper quartile', outline= F, las=2)
+EDASeq::plotRLE(counts_strain_tmm_3, main='Normalizzazione TMM', outline= F, las=2)
+EDASeq::plotRLE(counts_strain_rle_3, main='Normalizzazione RLE', outline= F, las=2)
+
+```
+
+La migliore normalizzazione sembra la TMM, quindi d'ora in poi useremo questa.
+
+# Costruzione dell'oggetto `DGEList`
+
+Il pacchetto edgeR richiede che costruiamo un oggetto S3 per l'utilizzo delle sue funzioni.
+
+Per creare questo oggetto si può utilizzare il costruttore `DGEList`. Al minimo questo oggetto deve contenere la matrice dei conteggi su cui vogliamo fare inferenza (di solito già filtrata).
+
+```{r}
+library(edgeR) 
+#dge <- DGEList(counts_strain) #è un oggetto DGE
+#è una lista, con due componenti: la prima è la matrice dei conteggi ($counts), la seconda è un dataframe  con una riga per ognuna dei campioni e poi alcune info che in parte abbiamo date noi e in parte ha calcolato ($samples)
+
+#library size è la somma per colonna
+#norm factors contiene il fattore di normalizzazione per ogni campione
+
+dge_3<-DGEList(counts_strain_3)
+
+```
+
+
+
+########### edgeR ##############
+
+
+
+# Normalizzazione
+Visti i risultati dell'analisi sopra, scegliamo la normalizzazione TMM.
+Nel caso di modelli di conteggio non vogliamo trasformare i dati, ma calcolare degli offset da utilizzare nel modello. Questo si può fare utilizzando la funzione `calcNormFactors` di edgeR.
+
+
+```{r}
+#dge <- edgeR::calcNormFactors(dge, method = "TMM") #serve a calcolare i fattori di normalizzazioni con vari metodi, di default TMM
+#la funzione calcnormfactors può essere applicata a diverse classi, e a seconda di dove la applico si comporta in modo diverso. per vedere le classi si veda l'help (DGElist, SummarizedExperiments e la classe default(una matrice))
+#Nella sezione value ci dice cosa ci dà in outuput in base all'input
+dge_3<-edgeR::calcNormFactors(dge_3, method = "TMM")
+```
+
+
+
+`calcNormFactors` applicata a un oggetto `DGEList` restituisce in output un nuovo `DGEList` che contiene delle informazioni aggiuntive. In questo caso, informazioni sui normalization factors.
+
+
+# Stima del parametro di dispersione
+Avendo già stimato la matrice del disegno, possiamo passare alla stima del parametro di dispersione
+Per stimare il parametro di dispersione si utilizza la funzione `estimateDisp`. Essa è costituita da tre step:
+
+- Stima di un parametro di dispersione globale;
+- Stima della relazione media-dispersione;
+- Stima Bayesiana a posteriori del parametro di dispersione per ogni microrganismi, "schiacciato" verso il trend.
+
+```{r}
+#stima del parametro di dispersione
+
+#dge_age<-  estimateDisp(dge, design_age)
+#dge_eta<- estimateDisp(dge, design_eta)
+
+
+dge_age_3<- estimateDisp(dge_3, design_age_3)
+#dge_eta_3<- estimateDisp(dge_3, design_eta_3)
+
+```
+
+
+Si possono visualizzare le stime di dispersione, usando diversi grafici.
+```{r}
+#plotMeanVar(dge_age, show.raw.vars = TRUE, show.tagwise.vars = TRUE, show.ave.raw.vars = FALSE)
+#plotMeanVar(dge_eta, show.raw.vars = TRUE, show.tagwise.vars = TRUE, show.ave.raw.vars = FALSE)
+
+plotMeanVar(dge_age_3, show.raw.vars = TRUE, show.tagwise.vars = TRUE, show.ave.raw.vars = FALSE)
+#plotMeanVar(dge_eta_3, show.raw.vars = TRUE, show.tagwise.vars = TRUE, show.ave.raw.vars = FALSE)
+```
+
+```{r}
+#BCV biological coefficient of variation: radice quadrata della stima di phi
+
+#plotBCV(dge_age)
+#plotBCV(dge_eta)
+
+
+plotBCV(dge_age_3)
+#plotBCV(dge_eta_3)
+```
+
+
+È possibile specificare una stima alternativa, per esempio schiacciando le stime sulla media globale invece che sul trend:
+```{r}
+#dge2_age <- estimateDisp(dge_age, design_age, trend.method = "none") 
+#plotBCV(dge2_age) 
+
+#dge2_eta <- estimateDisp(dge_eta, design_eta, trend.method = "none") 
+#plotBCV(dge2_eta) 
+
+```
+
+Infine, si possono specificare i gradi di libertà a priori, un parametro che regola quanto schiacciare le stime.
+
+```{r}
+#dge3_age <- estimateDisp(dge_age, design_age, trend.method = "none", prior.df =10) 
+#dge4_age <- estimateDisp(dge_age, design_age, trend.method = "none", prior.df = 0.1)
+
+#plotBCV(dge3_age)
+#plotBCV(dge4_age)
+
+#dge3_eta<- estimateDisp(dge_eta, design_eta, trend.method = "none", prior.df =50) 
+#plotBCV(dge3_eta)
+
+
+
+```
+
+
+# Fit del GLM
+
+Ora che abbiamo i fattori di normalizzazione, le stime di dispersione, e la matrice del disegno, fittiamo il modello GLM.
+
+
+```{r}
+#fit_age<- glmFit(dge_age, design_age)
+#fit_eta<- glmFit(dge_eta, design_eta)
+
+
+fit_age_3<- glmFit(dge_age_3, design_age_3)
+#fit_eta_3<- glmFit(dge_eta_3, design_eta_3)
+```
+
+# Test per l'espressione differenziale
+
+Il pacchetto edgeR utilizza il test di massima verosimiglianza per identificare i geni differenzialmente espressi, nella funzione `glmLRT`.
+
+Come al solito bisogna indicare un modello completo e uno nullo. Nel pacchetto edgeR questo si specifica indicando quali colonne della matrice del disegno non sono presenti nel modello nullo, ovvero quali coefficienti si vogliono testare.
+
+Per esempio se vogliamo individuare i geni che differiscono in almeno uno dei due gruppi, dovremo testare i due modelli:
+
+- Modello: `~ age_agg`
+- Modello nullo: `~ 1`
+
+Data la nostra matrice del disegno per l'età, questo corrisponde a testare le colonne 2 e 3.
+
+```{r}
+#res_age<- glmLRT(fit_age, coef = 2:3)
+#res_eta<- glmLRT(fit_eta, coef = 2:4)
+
+res_age_3<- glmLRT(fit_age_3, coef = 2:3)
+#res_eta_3<- glmLRT(fit_eta_3, coef = 2:4)
+```
+
+## Identificazione dei geni differenzialmente espressi
+
+Per identificare quali siano i geni differenzialmente espressi, possiamo utilizzare la funzione `topTags`, specificando un taglio sui p-value aggiustati.
+
+È spesso più utile farsi restituire da `topTags` tutti i geni (ordinati per p-value) e in seguito calcolare manualmente la percentuale di geni differenzialmente espressi. Questo consente di utilizzare i risultati per grafici diagnostici come la distribuzione dei p-value, volcano plot, e MA-plot.
+
+```{r}
+#top_age<-topTags(res_age, n=Inf)$table
+#table(top_age$FDR<=0.05)   #43
+#top_eta<- topTags(res_eta, n=Inf)$table
+#table(top_eta$FDR<=0.05) 
+
+
+top_age_3<-topTags(res_age_3, n=Inf)$table
+table(top_age_3$FDR<=0.05)    #25
+#top_eta_3<- topTags(res_eta_3, n=Inf)$table
+#table(top_eta_3$FDR<=0.05)
+
+```
+I microrganismi che risultano differenzialmente espressi tra le classi di età sono 25.
+
+
+## Contrasti
+
+Usiamo i contrasti per testare i diversi confronti tra gruppi.
+
+Quando si lavora con i contrasti, è in genere più semplice specificare un modello _senza intercetta_.
+```{r}
+#design0_age <- model.matrix(~ 0 + age_agg, data.frame(filtered_strain@sam_data))
+#design0_eta<- model.matrix(~ 0 + eta_agg, data.frame(filtered_strain@sam_data))
+
+design0_age_3<- model.matrix(~ 0 + age_agg, data.frame(samdata_strain_3))
+#design0_eta_3<- model.matrix(~ 0 + eta_agg, data.frame(samdata_strain_3))  
+```
+
+I contrasti si possono specificare utilizzando la funzione `makeContrasts`.
+
+Primo contrasto: differenze tra "Adulti" e "Giovani"
+
+```{r}
+#cont1_age <- makeContrasts(age_aggAdulti - age_aggGiovani, levels=design0_age)
+#cont1_eta <- makeContrasts(eta_aggAdulti - eta_aggAnziani, levels=design0_eta)
+
+cont1_age_3 <- makeContrasts(age_aggAdulti - age_aggGiovani, levels=design0_age_3)
+#cont1_eta_3 <- makeContrasts(eta_aggAdulti - eta_aggAnziani, levels=design0_eta_3)
+```
+
+
+```{r}
+#fit_c1_age <- glmFit(dge_age, design0_age)
+#fit_c1_eta <- glmFit(dge_eta, design0_eta)
+
+fit_c1_age_3 <- glmFit(dge_age_3, design0_age_3)
+#fit_c1_eta_3 <- glmFit(dge_eta_3, design0_eta_3)
+```
+
+L'unica differenza è che nel test di rapporto di verosimiglianza, specifichiamo `contrast` invece di `coef`.
+
+```{r}
+#res_c1_age <- glmLRT(fit_c1_age, contrast = cont1_age)
+#top_c1_age <- topTags(res_c1_age, n=Inf)$table 
+#table(top_c1_age$FDR<=0.05)
+
+#res_c1_eta <- glmLRT(fit_c1_eta, contrast = cont1_eta)
+#top_c1_eta <- topTags(res_c1_eta, n=Inf)$table 
+#table(top_c1_eta$FDR<=0.05)
+
+res_c1_age_3 <- glmLRT(fit_c1_age_3, contrast = cont1_age_3)
+top_c1_age_3 <- topTags(res_c1_age_3, n=Inf)$table 
+table(top_c1_age_3$FDR<=0.05)
+
+#res_c1_eta_3 <- glmLRT(fit_c1_eta_3, contrast = cont1_eta_3)
+#top_c1_eta_3 <- topTags(res_c1_eta_3, n=Inf)$table 
+#table(top_c1_eta_3$FDR<=0.05)
+```
+Nessun microrganismo differenzialmente espresso tra Adulti e Giovani
+
+Secondo contrasto: differenze tra "Anziani" e "Giovani"
+
+```{r}
+#cont2_age <- makeContrasts(age_aggAnziani - age_aggGiovani, levels=design0_age)
+#cont2_eta <- makeContrasts(eta_aggAnziani - eta_aggRagazzi, levels=design0_eta)
+
+
+cont2_age_3 <- makeContrasts(age_aggAnziani - age_aggGiovani, levels=design0_age_3)
+#cont2_eta_3 <- makeContrasts(eta_aggAnziani - eta_aggRagazzi, levels=design0_eta_3)
+
+
+
+#fit_c2_age <- glmFit(dge_age, design0_age)
+#fit_c2_eta <- glmFit(dge_eta, design0_eta)
+
+fit_c2_age_3 <- glmFit(dge_age_3, design0_age_3)
+#fit_c2_eta_3 <- glmFit(dge_eta_3, design0_eta_3)
+
+
+#res_c2_age <- glmLRT(fit_c2_age, contrast = cont2_age)
+#top_c2_age <- topTags(res_c2_age, n=Inf)$table 
+#table(top_c2_age$FDR<=0.05)
+
+#res_c2_eta <- glmLRT(fit_c2_eta, contrast = cont2_eta)
+#top_c2_eta <- topTags(res_c2_eta, n=Inf)$table 
+#table(top_c2_eta$FDR<=0.05)
+
+
+res_c2_age_3 <- glmLRT(fit_c2_age_3, contrast = cont2_age_3)
+top_c2_age_3 <- topTags(res_c2_age_3, n=Inf)$table 
+table(top_c2_age_3$FDR<=0.05)
+
+#res_c2_eta_3 <- glmLRT(fit_c2_eta_3, contrast = cont2_eta_3)
+#top_c2_eta_3 <- topTags(res_c2_eta_3, n=Inf)$table 
+#table(top_c2_eta_3$FDR<=0.05)
+```
+33 microrganismi risultano differenzialmente espressi tra Anziani e Giovani
+
+Terzo contrasto: differenze tra "Anziani" e "Adulti"
+
+```{r}
+#cont3_age <- makeContrasts(age_aggAnziani - age_aggAdulti, levels=design0_age)
+#cont3_eta <- makeContrasts(eta_aggAnziani - eta_aggBambini, levels=design0_eta)
+
+cont3_age_3 <- makeContrasts(age_aggAnziani - age_aggAdulti, levels=design0_age_3)
+#cont3_eta_3 <- makeContrasts(eta_aggAnziani - eta_aggBambini, levels=design0_eta_3)
+
+
+
+#fit_c3_age <- glmFit(dge_age, design0_age)
+#fit_c3_eta <- glmFit(dge_eta, design0_eta)
+
+fit_c3_age_3 <- glmFit(dge_age_3, design0_age_3)
+#fit_c3_eta_3 <- glmFit(dge_eta_3, design0_eta_3)
+
+
+
+#res_c3_age <- glmLRT(fit_c3_age, contrast = cont3_age) 
+#top_c3_age <- topTags(res_c3_age, n=Inf)$table 
+#table(top_c3_age$FDR<=0.05)
+
+#res_c3_eta <- glmLRT(fit_c3_eta, contrast = cont3_eta)
+#top_c3_eta <- topTags(res_c3_eta, n=Inf)$table 
+#table(top_c3_eta$FDR<=0.05)
+
+
+res_c3_age_3 <- glmLRT(fit_c3_age_3, contrast = cont3_age_3) 
+top_c3_age_3 <- topTags(res_c3_age_3, n=Inf)$table 
+table(top_c3_age_3$FDR<=0.05)
+
+#res_c3_eta_3 <- glmLRT(fit_c3_eta_3, contrast = cont3_eta_3)
+#top_c3_eta_3 <- topTags(res_c3_eta_3, n=Inf)$table 
+#table(top_c3_eta_3$FDR<=0.05)
+
+
+```
+
+1 microrganismo differenzialmente espresso tra Anziani e Adulti
+
+
+```{r}
+#cont4_eta <- makeContrasts(eta_aggAdulti - eta_aggBambini, levels=design0_eta)
+#cont4_eta_3 <- makeContrasts(eta_aggAdulti - eta_aggBambini, levels=design0_eta_3)
+
+#fit_c4_eta <- glmFit(dge_eta, design0_eta)
+#fit_c4_eta_3 <- glmFit(dge_eta_3, design0_eta_3)
+
+
+#res_c4_eta <- glmLRT(fit_c4_eta, contrast = cont4_eta) 
+#top_c4_eta <- topTags(res_c4_eta, n=Inf)$table 
+#table(top_c4_eta$FDR<=0.05)
+#2 diff espressi
+
+#tra adulti e bambini ci saremmo aspettati più microrganismi differenzialmente espressi che tra le altre classi di età, ma non è così
+```
+
+
+
+
+## Esplorazione dei risultati
+
+Per prima cosa possiamo osservare la distribuzione dei p-value.
+
+```{r}
+#hist(top_age$PValue, breaks=30)
+hist(top_age_3$PValue, breaks=30)
+
+#hist(top_c1$PValue, breaks=30)
+#hist(top_c2$PValue, breaks=30)
+#hist(top_c3$PValue, breaks=30)
+
+
+hist(top_c1_age_3$PValue, breaks=30)
+hist(top_c2_age_3$PValue, breaks=30)
+hist(top_c3_age_3$PValue, breaks=30)
+```
+
+Possiamo poi andare ad osservare l'andamento dei geni differenzialmente espressi utilizzando volcano plot e MA-plot.
+
+MA-plot
+```{r}
+#plotMD(res_age)  #
+#plotMD(res_c1)
+#plotMD(res_c2)
+#plotMD(res_c3)
+
+#plotMD(res_age_3)  #
+plotMD(res_c1_age_3, main= 'Adulti vs Giovani')
+plotMD(res_c2_age_3, main= 'Anziani vs Giovani')
+plotMD(res_c3_age_3, main= 'Anziani vs Adulti')
+```
+
+Volcano plot
+```{r}
+#plot(top_c1$logFC, -log10(top_c1$PValue), main= ' Adulti vs Giovani') #plottiamo -logaritmo in base 10 dei pvalue
+#genes_c1 <- rownames(top_c1)[1:62] #prendiamo i primi 100 geni con pvalue più basso
+#points(top_c1[genes_c1, "logFC"], -log10(top_c1[genes_c1, "PValue"]), col=2, pch=19)
+
+plot(top_c1_age_3$logFC, -log10(top_c1_age_3$PValue), main= ' Adulti vs Giovani') #plottiamo -logaritmo in base 10 dei pvalue
+genes_c1_age_3 <- rownames(top_c1_age_3)[1:62] #prendiamo i primi 100 geni con pvalue più basso
+points(top_c1_age_3[genes_c1_age_3, "logFC"], -log10(top_c1_age_3[genes_c1_age_3, "PValue"]), col=2, pch=19) 
+
+
+
+#plot(top_c2$logFC, -log10(top_c2$PValue), main= 'Anziani vs Giovani') #plottiamo -logaritmo in base 10 dei pvalue
+#genes_c2 <- rownames(top_c2)[1:18] #prendiamo i primi 100 geni con pvalue più basso
+#points(top_c2[genes_c2, "logFC"], -log10(top_c2[genes_c2, "PValue"]), col=2, pch=19) 
+
+plot(top_c2_age_3$logFC, -log10(top_c2_age_3$PValue), main= 'Anziani vs Giovani') #plottiamo -logaritmo in base 10 dei pvalue
+genes_c2_age_3 <- rownames(top_c2_age_3)[1:33] #prendiamo i primi 100 geni con pvalue più basso
+points(top_c2_age_3[genes_c2_age_3, "logFC"], -log10(top_c2_age_3[genes_c2_age_3, "PValue"]), col=2, pch=19) 
+
+
+
+#plot(top_c3$logFC, -log10(top_c3$PValue), main= 'Anziani vs Adulti') #plottiamo -logaritmo in base 10 dei pvalue
+#genes_c3 <- rownames(top_c3)[1:46] #prendiamo i primi 100 geni con pvalue più basso
+#points(top_c3[genes_c3, "logFC"], -log10(top_c3[genes_c3, "PValue"]), col=2, pch=19) 
+
+plot(top_c3_age_3$logFC, -log10(top_c3_age_3$PValue), main= 'Anziani vs Adulti') #plottiamo -logaritmo in base 10 dei pvalue
+genes_c3_age_3 <- rownames(top_c3_age_3)[1] #prendiamo i primi 100 geni con pvalue più basso
+points(top_c3_age_3[genes_c3_age_3, "logFC"], -log10(top_c3_age_3[genes_c3_age_3, "PValue"]), col=2, pch=19)
+```
+
+######## DESEQ2 ################
+
+```{r}
+#Analisi con deseq2 sia per age_agg che per gender
+
+library(DESeq2)
+obj<- phyloseq_to_deseq2(filtered_strain, design = ~age_agg)
+normFacts<-sizeFactors(DESeq2::estimateSizeFactors(obj, type='poscounts'))
+
+obj<- DESeq(obj, reduced=~1, test = 'LRT', parallel = F)
+
+
+obj_gen<- phyloseq_to_deseq2(filtered_strain, design = ~gender)
+normFacts_gen<-sizeFactors(DESeq2::estimateSizeFactors(obj_gen, type='poscounts'))
+
+obj_gen<- DESeq(obj_gen, reduced=~1, test = 'LRT', parallel = F)
+
+```
+Stima parametri di dispersione
+```{r}
+distEsts<-dispersions(obj)
+res_pos<-results(obj, alpha= 0.05)
+pValMat_pos<-as.matrix(res_pos[,c('pvalue','padj')])
+
+
+distEsts_gen<-dispersions(obj_gen)
+res_pos_gen<-results(obj_gen, alpha= 0.05)
+pValMat_pos_gen<-as.matrix(res_pos_gen[,c('pvalue','padj')])
+
+
+```
+
+
+```{r}
+#res_order<- res_pos[order(res_pos$padj),]
+#head(res_order)
+#summary(res_pos)
+#sum(res_pos$padj <0.05, na.rm = T)
+
+DA_features_index_pos <- which(pValMat_pos[,"padj"] < 0.05)
+DA_features_pos <- names(DA_features_index_pos)
+DA_pos<-c(DA_features_pos, DA_features_index_pos)
+
+
+DA_features_index_pos_gen <- which(pValMat_pos_gen[,"padj"] < 0.05)
+DA_features_pos_gen <- names(DA_features_index_pos_gen)
+DA_pos_gen<-c(DA_features_pos, DA_features_index_pos)
+
+
+# distribuzione dei p-value
+hist(pValMat_pos[,"pvalue"], breaks = 20)
+
+# MA-plot
+plotMA(res_pos) 
+
+#solo un microrganismo diff. espresso tra maschi e femmine, nessuno tra le classi di età
+```
+
+
+
+
+############# Limma-voom ############
+
+L'oggetto `DGEList` è pronto per essere analizzato dal pacchetto `limma`. Se vogliamo però esplorare i dati su cui andremo a fittare il modello possiamo usare la funzione `cpm` per calcolare i logCPM.
+
+```{r}
+#logcpm_age <- edgeR::cpm(dge_age, log = TRUE)
+#logcpm_eta <- edgeR::cpm(dge_eta, log = TRUE)
+
+
+logcpm_age_3 <- edgeR::cpm(dge_age_3, log = TRUE)
+```
+# Calcolo dei pesi
+
+A partire dall'oggetto `dge` possiamo utilizzare la funzione `voom()` del pacchetto `limma` per trasformare i dati in logCPM, stimare la relazione tra media e varianza, e calcolare i pesi per ogni osservazione.
+
+
+```{r}
+#v_age<- voom(dge_age, design_age, plot=TRUE)
+#v_eta<- voom(dge_eta, design_eta, plot=TRUE)
+
+v_age_3<- voom(dge_age_3, design_age_3, plot=TRUE)
+```
+Il risultato di `voom()` è un oggetto del pacchetto `limma` che può quindi essere direttamente utilizzato per fittare il modello lineare.
+
+
+# Modello lineare
+
+Siamo ora pronti per fittare il modello lineare. In modo simile a `edgeR`, il pacchetto `limma` implementa la funzione `lmFit` (ricordate che per `edgeR` era `glmFit`) per fittare un modello lineare per ogni organismo della matrice.
+
+In aggiunta, dobbiamo utilizzare la funzione `eBayes()` per calcolare le stime Bayesiane empiriche dei parametri, ovvero per "schiacciare" le stime verso un valore medio, e per calcolare la t moderata.
+
+
+```{r}
+library(limma)
+#fit_lm_age <- lmFit(v_age, design_age)
+#fit_lm_eta<- lmFit(v_eta, design_eta)
+fit_lm_age_3 <- lmFit(v_age_3, design_age_3)
+
+#fit_lm_age<- eBayes(fit_lm_age)
+#fit_lm_eta<- eBayes(fit_lm_eta)
+fit_lm_age_3<- eBayes(fit_lm_age_3)
+
+```
+
+## Identificazione dei geni differenzialmente espressi
+
+Per identificare quali siano i geni differenzialmente espressi, possiamo utilizzare la funzione `topTable`, specificando quale coefficiente vogliamo testare. Se vogliamo un test $F$ per testare le differenze tra tutti e tre i gruppi, possiamo specificare i coefficienti 2 e 3.
+
+
+```{r}
+#top_deseq_age <- topTable(fit_lm_age, coef=2:3, n=Inf)
+#top_deseq_eta <- topTable(fit_lm_eta, coef=2:4, n=Inf)
+top_deseq_age_3 <- topTable(fit_lm_age_3, coef=2:3, n=Inf)
+
+#table(top_deseq_age$adj.P.Val<=0.05)
+#nessun microrganismo differenzialmente espresso
+#table(top_deseq_eta$adj.P.Val<=0.05)
+table(top_deseq_age_3$adj.P.Val<=0.05)
+
+```
+Nessun microrganismo differenzialmente espresso
+
+In conclusione quindi, per quanto riguarda le classi di età, non ci sono microrganismi differenzialmente espressi in comune tra il metodo edgeR e il metodo voom.
+
+
+## Contrasti
+
+
+In generale tra le tre classi di età non troviamo microrganismi differenzialmente espressi, proviamo comunque per sicurezza almeno un contrasto, quello che con edgeR aveva dato più microrganismi differenzialmente espressi: Adulti vs Giovani.
+
+```{r, solution=TRUE}
+#riparamtrizziamo il modello senza intercetta
+
+#design0
+```
+
+I contrasti si possono specificare utilizzando la funzione `makeContrasts`.
+
+Supponiamo di essere interessati alle differenze tra "Del" e "Gly"
+
+```{r, solution=TRUE}
+#cont_4 <- makeContrasts(age_aggAdulti - age_aggGiovani, levels=design0)
+#input: le due categorie da confrontare, gly e del (il nome della variabile è quello che compare nella matrice del disegno); da quale matrice del disegno deve prednerle
+#cont_4
+#una sola colonna perchè solo due variabili
+```
+
+Avendo cambiato matrice del disegno dobbiamo ri-fittare il modello.
+
+```{r, solution=TRUE}
+#fit_c4 <- lmFit(v_age, design0)
+```
+
+Utilizziamo la funzione `contrasts.fit` per specificare quali contrasti calcolare.
+
+```{r, solution=TRUE}
+#fit_c4 <- contrasts.fit(fit_c4, cont_4)
+
+#fit_c4 <- eBayes(fit_c4)
+```
+
+La funzione `topTable` può essere di nuovo usata per ottenere i risultati per ogni microrganismo.
+
+```{r, solution=TRUE}
+#top_c4 <- topTable(fit_c4, coef=1, n=Inf)
+
+
+
+#table(top_c4$adj.P.Val<=0.05)
+
+#come ci aspettavamo nessun microrganismo risulta differenzialmente espresso
+```
+Nessun microrganismo differenzialmente espresso tra la classe d'età 'giovani' e quella 'adulti'
+
+
+
+
+##Analisi per gender
+
+```{r}
+#rendo gender una variabile fattoriale
+filtered_strain@sam_data$gender<- factor(filtered_strain@sam_data$gender)
+```
+
+Prime analisi esplorative: barplot
+
+```{r}
+barplot(colSums(counts_strain), col=pal[filtered_strain@sam_data$gender], las=2)
+abline(h=23000000)
+```
+
+Il differente numero di reads per campione non sembra essere collegato nemmeno alla variabile 'gender', per cui proseguiamo le analisi con il dataset a cui abbiamo rimosso i 12 campioni con numero di reads troppo elevato.
+
+Procediamo con l'analisi delle prime due componenti principali.
+```{r}
+plotPCA(counts_strain_3, col=pal[filtered_strain@sam_data$gender])
+#plotPCA(counts_strain, col=pal[filtered_strain@sam_data$gender])
+
+```
+Anche in questo caso, nessuna delle due componenti principali riesce a separare le due classi della variabile gender.
+
+Costruiamo la matrice del disegno inserendo come covariata la variabile 'gender'.
+
+```{r}
+#design_gender<-  model.matrix(~ gender, data.frame(filtered_strain@sam_data))
+design_gender_3<-  model.matrix(~ gender, data.frame(samdata_strain_3))
+```
+
+Anche per gender vediamo l'analisi con tSNE per vedere se a bassa dimensionalità riusciamo a trovare qualche relazione tra gender e l'output
+
+```{r}
+data.frame(W20,gender=colData(se_brito)$gender) %>%
+    ggplot(aes(W1,W2, colour=gender)) + geom_point() + 
+    scale_color_brewer(type = "qual", palette = "Set1") + theme_classic()
+#A t-SNE representation of the data can be obtained by computing the cell distances in the reduced space and running the t-SNE algorithm on the distance
+
+
+
+data.frame(Dim1=tsne_data$Y[,1], Dim2=tsne_data$Y[,2], 
+           gender=colData(se_brito)$gender) %>%
+    ggplot(aes(Dim1, Dim2, colour=gender)) + geom_point() + 
+    scale_color_brewer(type = "qual", palette = "Set1") + theme_classic()
+```
+
+# Normalizzazione tra campioni
+
+## Upper-quartile e full-quantile
+
+Il pacchetto `EDASeq` implementa diverse normalizzazioni. Tra quelle che abbiamo visto in classe, la upper-quartile e la full-quantile.
+
+Entrambe sono implementate nella funzione `betweenLaneNormalization`.
+
+```{r}
+#counts_strain_up <- betweenLaneNormalization(counts_strain, which="upper")
+#counts_strain_fu <- betweenLaneNormalization(counts_strain, which="full")
+
+counts_strain_up_3 <- betweenLaneNormalization(counts_strain_3, which="upper")
+counts_strain_fu_3 <- betweenLaneNormalization(counts_strain_3, which="full")
+```
+
+Nell'oggetto 'counts_strain_up' salviamo i dati normalizzati con la upper-quartile, in 'counts_strain_fu' i dati normalizzati con la full-quartile.
+
+
+
+
+```{r}
+#Possiamo verificare che le normalizzazioni abbiano fatto ciò per cui sono progettate andando a vedere il boxplot dei dati normalizzati: ci aspettiamo che nel caso della upper-quartile, tutti i quartili superiori siano uguali, mentre nel caso della full-quantile che le distribuzioni empiriche siano uguali.
+
+
+
+#boxplot(log1p(counts_strain_up),  las=2)
+#boxplot(log1p(counts_strain_fu), las=2)
+
+#boxplot(log1p(counts_strain_up_3),  las=2)
+#boxplot(log1p(counts_strain_fu_3), las=2)
+
+```
+
+
+
+
+## TMM
+La normalizzazione TMM è implementata nel pacchetto `edgeR`, in cui è implementata anche la upper-quartile.
+
+Per come è implementato `edgeR` non restituisce le matrici dei dati normalizzati, ma i fattori di normalizzazione, che moltiplicati per il numero totale di reads danno il fattore di scala da moltiplicare ai dati originali per ottenere i dati normalizzati.
+
+La funzione per calcolare i fattori di normalizzazione si chiama `calcNormFactor()`.
+
+```{r}
+library(edgeR)
+#tmm_factors <- edgeR::calcNormFactors(counts_strain, method = "TMM")
+tmm_factors_3<-  edgeR::calcNormFactors(counts_strain_3, method = "TMM")
+#counts_strain_tmm <- edgeR::cpm(counts_strain, lib.size = tmm_factors * colSums(counts_strain))
+counts_strain_tmm_3 <- edgeR::cpm(counts_strain_3, lib.size = tmm_factors_3 * colSums(counts_strain_3))
+
+#boxplot(log1p(counts_strain_tmm), las=2, outline=F)
+#boxplot(log1p(counts_strain_tmm_3), las=2, outline=F)
+
+
+```
+
+
+##RLE 
+Il metodo della media geometrica è chiamato `RLE` in `edgeR`.
+
+```{r}
+#rle_factors <- edgeR::calcNormFactors(counts_strain, method = "RLE") 
+rle_factors_3 <- edgeR::calcNormFactors(counts_strain_3, method = "RLE") 
+#fattori di normalizzazione
+#counts_strain_rle <- edgeR::cpm(counts_strain, lib.size = rle_factors * colSums(counts_strain))
+#salviamo la matrice negli assays
+
+counts_strain_rle_3 <- edgeR::cpm(counts_strain_3, lib.size = rle_factors_3 * colSums(counts_strain_3))
+
+#boxplot(log1p(counts_strain_rle), las=2)
+#boxplot(log1p(counts_strain_rle_3), las=2)
+```
+# Confronto tra normalizzazioni
+```{r}
+#EDASeq::plotRLE(counts_strain_fu, main='Normalizzazione Full quantile', outline= F, las=2)
+#EDASeq::plotRLE(counts_strain_up, main='Normalizzazione Upper quartile', outline= F, las=2)
+#EDASeq::plotRLE(counts_strain_tmm, main='Normalizzazione TMM', outline= F, las=2)
+#EDASeq::plotRLE(counts_strain_rle, main='Normalizzazione RLE', outline= F, las=2)
+
+EDASeq::plotRLE(counts_strain_fu_3, main='Normalizzazione Full quantile', outline= F, las=2)
+EDASeq::plotRLE(counts_strain_up_3, main='Normalizzazione Upper quartile', outline= F, las=2)
+EDASeq::plotRLE(counts_strain_tmm_3, main='Normalizzazione TMM', outline= F, las=2)
+EDASeq::plotRLE(counts_strain_rle_3, main='Normalizzazione RLE', outline= F, las=2)
+
+```
+
+La migliore normalizzazione sembra la TMM, quindi d'ora in poi useremo questa.
+
+# Costruzione dell'oggetto `DGEList`
+
+Il pacchetto edgeR richiede che costruiamo un oggetto S3 per l'utilizzo delle sue funzioni.
+
+Per creare questo oggetto si può utilizzare il costruttore `DGEList`. Al minimo questo oggetto deve contenere la matrice dei conteggi su cui vogliamo fare inferenza (di solito già filtrata).
+
+```{r}
+library(edgeR) 
+#dge <- DGEList(counts_strain) #è un oggetto DGE
+#è una lista, con due componenti: la prima è la matrice dei conteggi ($counts), la seconda è un dataframe  con una riga per ognuna dei campioni e poi alcune info che in parte abbiamo date noi e in parte ha calcolato ($samples)
+
+#library size è la somma per colonna
+#norm factors contiene il fattore di normalizzazione per ogni campione
+
+dge_3<-DGEList(counts_strain_3)
+
+```
+
+
+
+########### edgeR ##############
+
+
+
+# Normalizzazione
+Visti i risultati dell'analisi sopra, scegliamo la normalizzazione TMM.
+Nel caso di modelli di conteggio non vogliamo trasformare i dati, ma calcolare degli offset da utilizzare nel modello. Questo si può fare utilizzando la funzione `calcNormFactors` di edgeR.
+
+
+```{r}
+#dge <- edgeR::calcNormFactors(dge, method = "TMM") #serve a calcolare i fattori di normalizzazioni con vari metodi, di default TMM
+#la funzione calcnormfactors può essere applicata a diverse classi, e a seconda di dove la applico si comporta in modo diverso. per vedere le classi si veda l'help (DGElist, SummarizedExperiments e la classe default(una matrice))
+#Nella sezione value ci dice cosa ci dà in outuput in base all'input
+dge_3<-edgeR::calcNormFactors(dge_3, method = "TMM")
+```
+
+
+
+`calcNormFactors` applicata a un oggetto `DGEList` restituisce in output un nuovo `DGEList` che contiene delle informazioni aggiuntive. In questo caso, informazioni sui normalization factors.
+
+
+# Stima del parametro di dispersione
+Avendo già stimato la matrice del disegno, possiamo passare alla stima del parametro di dispersione
+Per stimare il parametro di dispersione si utilizza la funzione `estimateDisp`. Essa è costituita da tre step:
+
+- Stima di un parametro di dispersione globale;
+- Stima della relazione media-dispersione;
+- Stima Bayesiana a posteriori del parametro di dispersione per ogni microrganismi, "schiacciato" verso il trend.
+
+```{r}
+
+#dge_gender<- estimateDisp(dge, design_gender)
+dge_gender_3<- estimateDisp(dge_3, design_gender_3)
+
+```
+
+Si possono visualizzare le stime di dispersione, usando diversi grafici.
+
+```{r}
+#plotMeanVar(dge_gender, show.raw.vars = TRUE, show.tagwise.vars = TRUE, show.ave.raw.vars = FALSE)
+plotMeanVar(dge_gender_3, show.raw.vars = TRUE, show.tagwise.vars = TRUE, show.ave.raw.vars = FALSE)
+
+#plotBCV(dge_gender)
+plotBCV(dge_gender_3)
+
+```
+
+
+
+È possibile specificare una stima alternativa, per esempio schiacciando le stime sulla media globale invece che sul trend:
+```{r}
+#dge2_gender <- estimateDisp(dge_gender, design_gender, trend.method = "none") 
+#plotBCV(dge2_gender) 
+```
+
+Infine, si possono specificare i gradi di libertà a priori, un parametro che regola quanto schiacciare le stime.
+```{r}
+#dge3_gender <- estimateDisp(dge_gender, design_gender, trend.method = "none", prior.df =10) 
+#dge4_gender <- estimateDisp(dge_gender, design_gender, trend.method = "none", prior.df = 0.1)
+
+#plotBCV(dge3_gender)
+#plotBCV(dge4_gender)
+```
+
+
+
+
+
+
+# Fit del GLM
+
+Ora che abbiamo i fattori di normalizzazione, le stime di dispersione, e la matrice del disegno, fittiamo il modello GLM.
+
+
+```{r}
+
+#fit_gender<- glmFit(dge_gender, design_gender)
+fit_gender_3<- glmFit(dge_gender_3, design_gender_3)
+
+```
+
+
+# Test per l'espressione differenziale
+
+Il pacchetto edgeR utilizza il test di massima verosimiglianza per identificare i geni differenzialmente espressi, nella funzione `glmLRT`.
+
+Come al solito bisogna indicare un modello completo e uno nullo. Nel pacchetto edgeR questo si specifica indicando quali colonne della matrice del disegno non sono presenti nel modello nullo, ovvero quali coefficienti si vogliono testare.
+
+Per esempio se vogliamo individuare i geni che differiscono in almeno uno dei due gruppi, dovremo testare i due modelli:
+
+- Modello: `~ gender`
+- Modello nullo: `~ 1`
+
+Data la nostra matrice del disegno per il gender, questo corrisponde a testare la colonna 2.
+
+
+```{r}
+
+#res_gender<- glmLRT(fit_gender, coef = 2)
+res_gender_3<- glmLRT(fit_gender_3, coef = 2)
+
+```
+
+## Identificazione dei geni differenzialmente espressi
+
+Per identificare quali siano i geni differenzialmente espressi, possiamo utilizzare la funzione `topTags`, specificando un taglio sui p-value aggiustati.
+
+È spesso più utile farsi restituire da `topTags` tutti i geni (ordinati per p-value) e in seguito calcolare manualmente la percentuale di geni differenzialmente espressi. Questo consente di utilizzare i risultati per grafici diagnostici come la distribuzione dei p-value, volcano plot, e MA-plot.
+
+```{r}
+#top_gender<- topTags(res_gender, n=Inf)$table
+top_gender_3<- topTags(res_gender_3, n=Inf)$table
+
+#table(top_gender$FDR<=0.05)#55
+table(top_gender_3$FDR<=0.05) #37
+```
+
+37 microrganismi risultano differenzialmente espressi tra uomini e donne
+
+## Esplorazione dei risultati
+
+Per prima cosa possiamo osservare la distribuzione dei p-value.
+
+
+```{r}
+#hist(top_gender$PValue, breaks=30)
+hist(top_gender_3$PValue, breaks=30)
+
+```
+Possiamo poi andare ad osservare l'andamento dei geni differenzialmente espressi utilizzando volcano plot e MA-plot.
+```{r}
+
+#plotMD(res_gender)
+plotMD(res_gender_3)
+
+```
+
+
+Volcano plot
+```{r}
+
+#plot(top_gender$logFC, -log10(top_gender$PValue), main='Gender') #plottiamo -logaritmo in base 10 dei pvalue
+#genes_gender <- rownames(top_gender)[1:55] #prendiamo i primi 100 geni con pvalue più basso
+#points(top_gender[genes_gender, "logFC"], -log10(top_gender[genes_gender, "PValue"]), col=2, pch=19)
+
+
+
+plot(top_gender_3$logFC, -log10(top_gender_3$PValue), main='Gender') #plottiamo -logaritmo in base 10 dei pvalue
+genes_gender_3 <- rownames(top_gender_3)[1:37] #prendiamo i primi 100 geni con pvalue più basso
+points(top_gender_3[genes_gender_3, "logFC"], -log10(top_gender_3[genes_gender_3, "PValue"]), col=2, pch=19)
+```
+
+
+
+
+############# Limma-voom ############
+
+L'oggetto `DGEList` è pronto per essere analizzato dal pacchetto `limma`. Se vogliamo però esplorare i dati su cui andremo a fittare il modello possiamo usare la funzione `cpm` per calcolare i logCPM.
+
+
+
+```{r}
+
+#logcpm_gender <- edgeR::cpm(dge_gender, log = TRUE)
+logcpm_gender_3 <- edgeR::cpm(dge_gender_3, log = TRUE)
+
+```
+
+# Calcolo dei pesi
+
+A partire dall'oggetto `dge` possiamo utilizzare la funzione `voom()` del pacchetto `limma` per trasformare i dati in logCPM, stimare la relazione tra media e varianza, e calcolare i pesi per ogni osservazione.
+
+```{r}
+
+#v_gender <- voom(dge_gender, design_gender, plot=TRUE)
+v_gender_3 <- voom(dge_gender_3, design_gender_3, plot=TRUE)
+
+```
+# Modello lineare
+
+Siamo ora pronti per fittare il modello lineare. In modo simile a `edgeR`, il pacchetto `limma` implementa la funzione `lmFit` (ricordate che per `edgeR` era `glmFit`) per fittare un modello lineare per ogni microrganismo della matrice.
+
+In aggiunta, dobbiamo utilizzare la funzione `eBayes()` per calcolare le stime Bayesiane empiriche dei parametri, ovvero per "schiacciare" le stime verso un valore medio, e per calcolare la t moderata.
+
+```{r}
+
+#fit_lm_gender <- lmFit(v_gender, design_gender)
+fit_lm_gender_3 <- lmFit(v_gender_3, design_gender_3)
+
+#fit_lm_gender<- eBayes(fit_lm_gender)
+fit_lm_gender_3<- eBayes(fit_lm_gender_3)
+
+```
+
+## Identificazione dei geni differenzialmente espressi
+
+```{r}
+
+#top_deseq_gender <- topTable(fit_lm_gender, coef=2, n=Inf)
+top_deseq_gender_3 <- topTable(fit_lm_gender_3, coef=2, n=Inf)
+
+#table(top_deseq_gender$adj.P.Val<=0.05)
+table(top_deseq_gender_3$adj.P.Val<=0.05)
+
+```
+
+Il metodo limma-voom trova 43 microrganismi differenzialmente espressi tra maschi e femmine
+
+
+
+## Esplorazione dei risultati
+```{r}
+
+#hist(top_deseq_gender$P.Value, breaks=30)
+hist(top_deseq_gender_3$P.Value, breaks=30)
+
+```
+Possiamo poi andare ad osservare l'andamento dei geni differenzialmente espressi utilizzando volcano plot e MA-plot.
+```{r}
+
+#plotMD(fit_lm_gender)
+plotMD(fit_lm_gender_3)
+
+```
+
+Volcano plot
+```{r}
+
+#plot(top_deseq_gender$logFC, -log10(top_deseq_gender$P.Value))
+#genes <- rownames(top_deseq_gender)[1:24]
+#points(top_deseq_gender[genes, "logFC"], -log10(top_deseq_gender[genes, "P.Value"]), col=2, pch=19)
+
+
+
+plot(top_deseq_gender_3$logFC, -log10(top_deseq_gender_3$P.Value))
+genes <- rownames(top_deseq_gender_3)[1:43]
+points(top_deseq_gender_3[genes, "logFC"], -log10(top_deseq_gender_3[genes, "P.Value"]), col=2, pch=19)
+```
+# Confronto dei risultati
+
+Per confrontare i risultati tra metodi possiamo utilizzare il pacchetto `UpSetR`.
+L'input deve essere un `data.frame` di indicatori se un microrganismo è DE o no secondo ogni metodo.
+
+```{r}
+#de_edger <- rownames(top_gender)[top_gender$FDR<=0.05]
+de_edger_3 <- rownames(top_gender_3)[top_gender_3$FDR<=0.05]
+
+#de_voom <- rownames(top_deseq_gender)[top_deseq_gender$adj.P.Val<=0.05]
+de_voom_3 <- rownames(top_deseq_gender_3)[top_deseq_gender_3$adj.P.Val<=0.05]
+
+#de_list <- list(voom=de_voom, edger=de_edger)
+de_list_3 <- list(voom=de_voom_3, edger=de_edger_3)
+
+#genes <- unique(unlist(de_list))
+genes_3 <- unique(unlist(de_list_3))
+
+#df <- as.data.frame(sapply(de_list, function(x) as.numeric(genes %in% x)))
+#upset(df, text.scale = 1.7)
+
+df_3 <- as.data.frame(sapply(de_list_3, function(x) as.numeric(genes_3 %in% x)))
+upset(df_3, text.scale = 1.7)
+```
+I due metodi, edgeR e limma-voom, trovano in comune solo 5 microrganismi differenzialmente espressi. Questo è probabilmente dovuto dal fatto che non è presente variabilità biologica all'interno dei dati, e che i risultati trovati siano solo dovuti a variabilità tecnica perciò casuali.
+
+
+Troviamo i nomi di questi 5 microrganismi
+```{r}
+ind<-which(df_3$voom==1 & df_3$edger==1)
+(genes_3)[ind]
+```
+
+
+
